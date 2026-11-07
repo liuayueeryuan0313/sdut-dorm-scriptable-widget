@@ -3,7 +3,7 @@
 const KEY='dorm.widget.api.v1',TITLE='查寝 / 电量',PATH='/api/widget/v1/dorm';
 const TOKEN_RE=/^dw_[A-Za-z0-9_-]{43}$/,DEFAULT_ORIGIN='',IS_DORM=true;
 const HELP='填写部署后手机可访问的 HTTP 或 HTTPS 站点地址，可带端口。在管理网页「连接与计划 → 小组件接口」生成专用 Token。无需管理密码或学校密码。';
-const MENU_HELP='中号 4×2 · 最近查寝成绩 / 剩余电量 · 最大电量在本机手动配置';
+const MENU_HELP='中号 4×2 · 最近查寝成绩 / 剩余电量 · 电量增加时自动更新总量';
 
 function validateData(d){return d?.schemaVersion===1&&d.timezone==='Asia/Shanghai'&&(d.inspection===null||(d.inspection&&typeof d.inspection==='object'&&(d.inspection.score===null||validNumber(d.inspection.score))))&&d.electricity&&(d.electricity.remainingKwh===null||validNumber(d.electricity.remainingKwh)&&d.electricity.remainingKwh>=0)&&['ok','error','unavailable'].includes(d.electricity.state)&&typeof d.electricity.stale==='boolean';}
 const D={text:'#F8FAFC',muted:'#94A3B8',sub:'#64748B',cyan:'#38BDF8',green:'#34D399',warn:'#FBBF24'};
@@ -22,8 +22,8 @@ function render(settings,p){
   const w=new ListWidget(),g=new LinearGradient();g.colors=[new Color('#101A2C'),new Color('#0D1321'),new Color('#080D17')];g.locations=[0,.55,1];g.startPoint=new Point(0,0);g.endPoint=new Point(1,1);w.backgroundGradient=g;w.setPadding(16,18,16,18);
   if(config.widgetFamily&&config.widgetFamily!=='medium'&&config.runsInWidget){txt(w,'请选择中号（4×2）组件',15,D.cyan,true);return w;}
   if(!p.data){txt(w,TITLE,17,D.cyan,true);w.addSpacer(12);const t=txt(w,p.error||'请先配置连接',13,D.muted);t.lineLimit=3;w.addSpacer();return w;}
-  const d=p.data,i=d.inspection,e=d.electricity,max=p.demo?100:settings.maxKwh;
-  const hasMax=validNumber(max)&&max>0,hasKwh=validNumber(e.remainingKwh);
+  const d=p.data,i=d.inspection,e=d.electricity,max=p.demo?100:settings.electricityCycle?.totalKwh;
+  const hasTotal=validNumber(max)&&max>=0,hasMax=hasTotal&&max>0,hasKwh=validNumber(e.remainingKwh);
   const low=hasKwh&&e.remainingKwh<20;
   const ratio=hasMax&&hasKwh?Math.max(0,Math.min(1,e.remainingKwh/max)):null;
   const dims=widgetMetrics(),side=(dims.width-36-16.5)/2;
@@ -53,7 +53,7 @@ function render(settings,p){
   if(!p.demo){if(p.offline)note+=' · 离线缓存';else if(e.stale||e.state==='error')note+=' · 历史值';if(d.monitor?.hasError)note+=' · 查寝采集异常';}
   const footer=w.addStack();footer.layoutHorizontally();footer.centerAlignContent();
   const status=footer.addStack();status.size=new Size(side,11);txt(status,note,8,p.offline||e.stale||e.state==='error'?D.warn:D.sub);
-  footer.addSpacer(16.5);const caption=footer.addStack();caption.size=new Size(side,11);caption.addSpacer();txt(caption,hasMax?'共 '+max+' 度':'请设置最大电量',9,hasMax?D.sub:D.warn);caption.addSpacer();
+  footer.addSpacer(16.5);const caption=footer.addStack();caption.size=new Size(side,11);caption.addSpacer();txt(caption,hasTotal?'共 '+max+' 度':'等待有效电量',9,hasTotal?D.sub:D.warn);caption.addSpacer();
   return w;
 }
 function demoData(){return {schemaVersion:1,timezone:'Asia/Shanghai',inspection:{date:localDay(),score:95,level:'优秀',building:'示例公寓',room:'814',checkType:'宿舍卫生'},electricity:{remainingKwh:58.6,checkedAt:new Date().toISOString(),stale:false,state:'ok'},monitor:{hasError:false}};}
@@ -77,23 +77,17 @@ async function configure(settings){
   const changed=origin!==settings.origin||token!==settings.token;
   if(changed||settings.blocked)clearCache();
   const next={...settings,origin,token,blocked:false};
+  if(changed)delete next.electricityCycle;
   Keychain.set(KEY,JSON.stringify(next));return next;
 }
 async function select(){
   let settings=readSettings();if(config.runsInWidget)return {settings};
   const a=new Alert();a.title=TITLE;a.message=MENU_HELP;
   a.addAction('刷新并预览');a.addAction('配置接口与 Token');
-  if(IS_DORM)a.addAction('设置圆环最大电量');
   a.addAction('示例预览');a.addCancelAction('取消');
   const c=await a.presentAlert();if(c<0)return null;
   if(c===1){settings=await configure(settings);if(!settings)return null;}
-  if(IS_DORM&&c===2){
-    const p=new Alert();p.title='圆环最大电量';p.message='手动填写大于 0 的度数并保存在本机，没有默认值。';p.addTextField('最大电量（度）',settings.maxKwh?String(settings.maxKwh):'');p.addAction('保存');p.addCancelAction('取消');
-    if(await p.presentAlert()<0)return null;
-    const maxKwh=Number(p.textFieldValue(0).trim());if(!Number.isFinite(maxKwh)||maxKwh<=0)throw Error('最大电量必须大于 0');
-    settings={...settings,maxKwh};Keychain.set(KEY,JSON.stringify(settings));
-  }
-  return {settings,demo:c===(IS_DORM?3:2)};
+  return {settings,demo:c===2};
 }
 function validNumber(n){return typeof n==='number'&&Number.isFinite(n);}
 function localDay(d=new Date()){return new Date(d.getTime()+28800000).toISOString().slice(0,10);}
@@ -106,11 +100,28 @@ function widgetMetrics(){
   const w=Math.max(280,Math.min(380,width-64));return {width:w,mediumHeight:Math.floor((w-22)/2),height:Math.floor(w*1.047)};
 }
 function dayShift(s,n){return localDay(new Date(Date.parse(s+'T00:00:00+08:00')+n*86400000));}
-function displayTime(value){
-  if(!value)return '—';
+function readingTime(value){
+  if(!value)return NaN;
   const raw=String(value),fixed=/^\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?$/.test(raw)?raw.replace(' ','T')+'+08:00':raw;
-  const ms=Date.parse(fixed);if(!Number.isFinite(ms))return '—';
+  return Date.parse(fixed);
+}
+function displayTime(value){
+  const ms=readingTime(value);if(!Number.isFinite(ms))return '—';
   const s=new Date(ms+28800000).toISOString();return s.slice(5,10).replace('-','/')+' '+s.slice(11,16);
+}
+function updateElectricityCycle(settings,packet){
+  const e=packet.data?.electricity;
+  if(packet.demo||packet.offline||!e||e.state!=='ok'||e.stale||!validNumber(e.remainingKwh)||e.remainingKwh<0)return;
+  const checkedAt=readingTime(e.checkedAt);
+  if(!Number.isFinite(checkedAt))return;
+  const previous=settings.electricityCycle;
+  const hasPrevious=previous&&validNumber(previous.totalKwh)&&previous.totalKwh>=0&&validNumber(previous.remainingKwh)&&previous.remainingKwh>=0&&validNumber(previous.checkedAt);
+  // Compare only newer successful samples; old readings must not simulate a recharge.
+  if(hasPrevious&&checkedAt<=previous.checkedAt)return;
+  const totalKwh=!hasPrevious||e.remainingKwh>previous.remainingKwh?e.remainingKwh:previous.totalKwh;
+  const electricityCycle={totalKwh,remainingKwh:e.remainingKwh,checkedAt};
+  Keychain.set(KEY,JSON.stringify({...settings,electricityCycle}));
+  settings.electricityCycle=electricityCycle;
 }
 async function fetchPacket(settings){
   if(!settings.origin||!settings.token)return {error:'请先配置接口与 Token'};
@@ -141,10 +152,11 @@ async function main(){
   try{
     const selected=await select();if(!selected){Script.complete();return;}
     const packet=selected.demo?{data:demoData(),demo:true,savedAt:Date.now()}:await fetchPacket(selected.settings);
+    updateElectricityCycle(selected.settings,packet);
     const widget=render(selected.settings,packet);widget.url=openSettings();widget.refreshAfterDate=new Date(Date.now()+30*60000);
     if(config.runsInWidget)Script.setWidget(widget);else if(IS_DORM)await widget.presentMedium();else await widget.presentLarge();
   }catch(e){
-    const allowed=['地址格式不正确：请输入 http://服务器IP:端口，或完整查寝接口地址；不要带问号参数。','Token 格式不正确：请填写查寝项目生成的完整 dw_ 开头专用 Token。','最大电量必须大于 0'];
+    const allowed=['地址格式不正确：请输入 http://服务器IP:端口，或完整查寝接口地址；不要带问号参数。','Token 格式不正确：请填写查寝项目生成的完整 dw_ 开头专用 Token。'];
     const detail=allowed.includes(e.message)?e.message:'发生未识别的配置或显示错误；请检查地址、Token 和 Scriptable 权限。';
     const widget=new ListWidget();widget.backgroundColor=new Color(IS_DORM?'#0D1321':'#191E1B');widget.setPadding(18,18,18,18);
     const text=widget.addText(detail);text.textColor=new Color('#CBD5E1');text.font=Font.systemFont(14);widget.url=openSettings();
